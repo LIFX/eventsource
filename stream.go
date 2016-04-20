@@ -18,6 +18,7 @@ type Stream struct {
 	req         *http.Request
 	lastEventId string
 	retry       time.Duration
+	closed      bool
 	// Events emits the events received by the stream
 	Events chan Event
 	// Errors emits any errors encountered while reading events from the stream.
@@ -55,6 +56,7 @@ func SubscribeWithRequest(lastEventId string, req *http.Request) (*Stream, error
 		req:         req,
 		lastEventId: lastEventId,
 		retry:       (time.Millisecond * 3000),
+		closed:      false,
 		Events:      make(chan Event),
 		Errors:      make(chan error),
 	}
@@ -66,6 +68,10 @@ func SubscribeWithRequest(lastEventId string, req *http.Request) (*Stream, error
 	}
 	go stream.stream(r)
 	return stream, nil
+}
+
+func (stream *Stream) Close() {
+	stream.closed = true
 }
 
 // Go's http package doesn't copy headers across when it encounters
@@ -107,13 +113,17 @@ func (stream *Stream) stream(r io.ReadCloser) {
 	defer r.Close()
 	dec := NewDecoder(r)
 	for {
-		ev, err := dec.Decode()
+		if stream.closed {
+			return
+		}
 
+		ev, err := dec.Decode()
 		if err != nil {
 			stream.Errors <- err
 			// respond to all errors by reconnecting and trying again
 			break
 		}
+
 		pub := ev.(*publication)
 		if pub.Retry() > 0 {
 			stream.retry = time.Duration(pub.Retry()) * time.Millisecond
@@ -121,6 +131,7 @@ func (stream *Stream) stream(r io.ReadCloser) {
 		if len(pub.Id()) > 0 {
 			stream.lastEventId = pub.Id()
 		}
+
 		stream.Events <- ev
 	}
 	backoff := stream.retry
