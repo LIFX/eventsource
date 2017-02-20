@@ -127,27 +127,37 @@ func (stream *Stream) stream(r io.ReadCloser) {
 	defer r.Close()
 	dec := NewDecoder(r)
 	for {
-		if stream.closed {
-			stream.Cancelfunc()
+		select {
+		case <-stream.ctx.Done():
 			return
-		}
+		default:
+			if stream.closed {
+				stream.Cancelfunc()
+				return
+			}
 
-		ev, err := dec.Decode()
-		if err != nil {
-			stream.Errors <- err
-			// respond to all errors by reconnecting and trying again
-			break
-		}
+			ev, err := dec.Decode()
+			if err != nil {
+				select {
+				case stream.Errors <- err:
+					// respond to all errors by reconnecting and trying again
+					break
+				default:
+					// if we can't send to the channel we still need to close
+					break
+				}
+			}
 
-		pub := ev.(*publication)
-		if pub.Retry() > 0 {
-			stream.retry = time.Duration(pub.Retry()) * time.Millisecond
-		}
-		if len(pub.Id()) > 0 {
-			stream.lastEventId = pub.Id()
-		}
+			pub := ev.(*publication)
+			if pub.Retry() > 0 {
+				stream.retry = time.Duration(pub.Retry()) * time.Millisecond
+			}
+			if len(pub.Id()) > 0 {
+				stream.lastEventId = pub.Id()
+			}
 
-		stream.Events <- ev
+			stream.Events <- ev
+		}
 	}
 	backoff := stream.retry
 	for {
