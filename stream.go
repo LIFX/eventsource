@@ -123,8 +123,7 @@ func (stream *Stream) connect() (context.CancelFunc, io.ReadCloser, error) {
 	return cancel, r, nil
 }
 
-func (stream *Stream) stream(r io.ReadCloser) {
-	defer r.Close()
+func (stream *Stream) readLoop(r io.ReadCloser) {
 	dec := NewDecoder(r)
 	for {
 		select {
@@ -141,10 +140,10 @@ func (stream *Stream) stream(r io.ReadCloser) {
 				select {
 				case stream.Errors <- err:
 					// respond to all errors by reconnecting and trying again
-					break
+					return
 				default:
 					// if we can't send to the channel we still need to close
-					break
+					return
 				}
 			}
 
@@ -155,10 +154,14 @@ func (stream *Stream) stream(r io.ReadCloser) {
 			if len(pub.Id()) > 0 {
 				stream.lastEventId = pub.Id()
 			}
-
 			stream.Events <- ev
 		}
 	}
+}
+
+func (stream *Stream) stream(r io.ReadCloser) {
+	defer r.Close()
+	stream.readLoop(r)
 	backoff := stream.retry
 	for {
 		stream.Cancelfunc()
