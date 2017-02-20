@@ -1,6 +1,7 @@
 package eventsource
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -27,7 +28,9 @@ type Stream struct {
 	// even if that involves reconnecting to the server.
 	Errors chan error
 	// Logger is a logger that, when set, will be used for logging debug messages
-	Logger *log.Logger
+	Logger     *log.Logger
+	Cancelfunc context.CancelFunc
+	ctx        context.Context
 }
 
 type SubscriptionError struct {
@@ -41,17 +44,17 @@ func (e SubscriptionError) Error() string {
 
 // Subscribe to the Events emitted from the specified url.
 // If lastEventId is non-empty it will be sent to the server in case it can replay missed events.
-func Subscribe(url, lastEventId string) (*Stream, error) {
+func Subscribe(ctx context.Context, url, lastEventId string) (*Stream, error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
-	return SubscribeWithRequest(lastEventId, req)
+	return SubscribeWithRequest(ctx, lastEventId, req)
 }
 
 // SubscribeWithRequest will take an http.Request to setup the stream, allowing custom headers
 // to be specified, authentication to be configured, etc.
-func SubscribeWithRequest(lastEventId string, req *http.Request) (*Stream, error) {
+func SubscribeWithRequest(ctx context.Context, lastEventId string, req *http.Request) (*Stream, error) {
 	stream := &Stream{
 		req:         req,
 		lastEventId: lastEventId,
@@ -61,12 +64,14 @@ func SubscribeWithRequest(lastEventId string, req *http.Request) (*Stream, error
 		Errors:      make(chan error),
 	}
 	stream.c.CheckRedirect = checkRedirect
+	stream.ctx = ctx
 
-	r, err := stream.connect()
+	cancel, r, err := stream.connect()
 	if err != nil {
 		return nil, err
 	}
 	go stream.stream(r)
+	stream.Cancelfunc = cancel
 	return stream, nil
 }
 
@@ -88,25 +93,33 @@ func checkRedirect(req *http.Request, via []*http.Request) error {
 	return nil
 }
 
-func (stream *Stream) connect() (r io.ReadCloser, err error) {
+func (stream *Stream) connect() (context.CancelFunc, io.ReadCloser, error) {
 	var resp *http.Response
+	var err error
+	ctx, cancel := context.WithCancel(stream.ctx)
+
 	stream.req.Header.Set("Cache-Control", "no-cache")
 	stream.req.Header.Set("Accept", "text/event-stream")
 	if len(stream.lastEventId) > 0 {
 		stream.req.Header.Set("Last-Event-ID", stream.lastEventId)
 	}
-	if resp, err = stream.c.Do(stream.req); err != nil {
-		return
+	req := stream.req.WithContext(ctx)
+	if resp, err = stream.c.Do(req); err != nil {
+		cancel()
+		return nil, nil, err
 	}
 	if resp.StatusCode != 200 {
 		message, _ := ioutil.ReadAll(resp.Body)
+		defer resp.Body.Close()
+		cancel()
 		err = SubscriptionError{
 			Code:    resp.StatusCode,
 			Message: string(message),
 		}
+		return nil, nil, err
 	}
-	r = resp.Body
-	return
+	r := resp.Body
+	return cancel, r, nil
 }
 
 func (stream *Stream) stream(r io.ReadCloser) {
@@ -114,6 +127,7 @@ func (stream *Stream) stream(r io.ReadCloser) {
 	dec := NewDecoder(r)
 	for {
 		if stream.closed {
+			stream.Cancelfunc()
 			return
 		}
 
@@ -136,6 +150,7 @@ func (stream *Stream) stream(r io.ReadCloser) {
 	}
 	backoff := stream.retry
 	for {
+		stream.Cancelfunc()
 		time.Sleep(backoff)
 		if stream.Logger != nil {
 			stream.Logger.Printf("Reconnecting in %0.4f secs\n", backoff.Seconds())
@@ -144,12 +159,14 @@ func (stream *Stream) stream(r io.ReadCloser) {
 		// NOTE: because of the defer we're opening the new connection
 		// before closing the old one. Shouldn't be a problem in practice,
 		// but something to be aware of.
-		next, err := stream.connect()
-		if err == nil {
-			go stream.stream(next)
-			break
+		cancel, next, err := stream.connect()
+		stream.Cancelfunc = cancel
+		if err != nil {
+			stream.Errors <- err
+			backoff *= 2
+			continue
 		}
-		stream.Errors <- err
-		backoff *= 2
+		go stream.stream(next)
+		return
 	}
 }
