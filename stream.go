@@ -70,8 +70,9 @@ func SubscribeWithRequest(ctx context.Context, lastEventId string, req *http.Req
 	if err != nil {
 		return nil, err
 	}
-	go stream.stream(r)
 	stream.Cancelfunc = cancel
+	go stream.stream(r)
+
 	return stream, nil
 }
 
