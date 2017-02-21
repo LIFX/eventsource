@@ -161,30 +161,50 @@ func (stream *Stream) readLoop(r io.ReadCloser) bool {
 	}
 }
 
+func (stream *Stream) retryLoop() {
+	backoff := stream.retry
+	for {
+		select {
+		case <-stream.ctx.Done():
+			return
+		default:
+			stream.Cancelfunc()
+			time.Sleep(backoff)
+			if stream.Logger != nil {
+				stream.Logger.Printf("Reconnecting in %0.4f secs\n", backoff.Seconds())
+			}
+
+			// NOTE: because of the defer we're opening the new connection
+			// before closing the old one. Shouldn't be a problem in practice,
+			// but something to be aware of.
+			cancel, next, err := stream.connect()
+			stream.Cancelfunc = cancel
+
+			if err != nil {
+				select {
+				case stream.Errors <- err:
+					// respond to all errors by reconnecting and trying again
+					backoff *= 2
+					continue
+				default:
+					// if we can't send to the channel we still need to close
+					return
+				}
+			}
+			if err != nil {
+				stream.Errors <- err
+
+			}
+			go stream.stream(next)
+			return
+		}
+	}
+}
+
 func (stream *Stream) stream(r io.ReadCloser) {
 	defer r.Close()
 	if !stream.readLoop(r) {
 		return
 	}
-	backoff := stream.retry
-	for {
-		stream.Cancelfunc()
-		time.Sleep(backoff)
-		if stream.Logger != nil {
-			stream.Logger.Printf("Reconnecting in %0.4f secs\n", backoff.Seconds())
-		}
-
-		// NOTE: because of the defer we're opening the new connection
-		// before closing the old one. Shouldn't be a problem in practice,
-		// but something to be aware of.
-		cancel, next, err := stream.connect()
-		stream.Cancelfunc = cancel
-		if err != nil {
-			stream.Errors <- err
-			backoff *= 2
-			continue
-		}
-		go stream.stream(next)
-		return
-	}
+	stream.retryLoop()
 }
