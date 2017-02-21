@@ -66,11 +66,10 @@ func SubscribeWithRequest(ctx context.Context, lastEventId string, req *http.Req
 	stream.c.CheckRedirect = checkRedirect
 	stream.ctx = ctx
 
-	cancel, r, err := stream.connect()
+	r, err := stream.connect()
 	if err != nil {
 		return nil, err
 	}
-	stream.Cancelfunc = cancel
 	go stream.stream(r)
 
 	return stream, nil
@@ -94,11 +93,11 @@ func checkRedirect(req *http.Request, via []*http.Request) error {
 	return nil
 }
 
-func (stream *Stream) connect() (context.CancelFunc, io.ReadCloser, error) {
+func (stream *Stream) connect() (io.ReadCloser, error) {
 	var resp *http.Response
 	var err error
 	ctx, cancel := context.WithCancel(stream.ctx)
-
+	stream.Cancelfunc = cancel
 	stream.req.Header.Set("Cache-Control", "no-cache")
 	stream.req.Header.Set("Accept", "text/event-stream")
 	if len(stream.lastEventId) > 0 {
@@ -107,7 +106,7 @@ func (stream *Stream) connect() (context.CancelFunc, io.ReadCloser, error) {
 	req := stream.req.WithContext(ctx)
 	if resp, err = stream.c.Do(req); err != nil {
 		cancel()
-		return nil, nil, err
+		return nil, err
 	}
 	if resp.StatusCode != 200 {
 		message, _ := ioutil.ReadAll(resp.Body)
@@ -117,10 +116,10 @@ func (stream *Stream) connect() (context.CancelFunc, io.ReadCloser, error) {
 			Code:    resp.StatusCode,
 			Message: string(message),
 		}
-		return nil, nil, err
+		return nil, err
 	}
 	r := resp.Body
-	return cancel, r, nil
+	return r, nil
 }
 
 // readLoop returns a bool returns true in the event that the connection should
@@ -177,9 +176,7 @@ func (stream *Stream) retryLoop() {
 			// NOTE: because of the defer we're opening the new connection
 			// before closing the old one. Shouldn't be a problem in practice,
 			// but something to be aware of.
-			cancel, next, err := stream.connect()
-			stream.Cancelfunc = cancel
-
+			next, err := stream.connect()
 			if err != nil {
 				select {
 				case stream.Errors <- err:
@@ -190,10 +187,6 @@ func (stream *Stream) retryLoop() {
 					// if we can't send to the channel we still need to close
 					return
 				}
-			}
-			if err != nil {
-				stream.Errors <- err
-
 			}
 			go stream.stream(next)
 			return
