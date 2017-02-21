@@ -123,16 +123,18 @@ func (stream *Stream) connect() (context.CancelFunc, io.ReadCloser, error) {
 	return cancel, r, nil
 }
 
-func (stream *Stream) readLoop(r io.ReadCloser) {
+// readLoop returns a bool returns true in the event that the connection should
+// retried
+func (stream *Stream) readLoop(r io.ReadCloser) bool {
 	dec := NewDecoder(r)
 	for {
 		select {
 		case <-stream.ctx.Done():
-			return
+			return false
 		default:
 			if stream.closed {
 				stream.Cancelfunc()
-				return
+				return false
 			}
 
 			ev, err := dec.Decode()
@@ -140,10 +142,10 @@ func (stream *Stream) readLoop(r io.ReadCloser) {
 				select {
 				case stream.Errors <- err:
 					// respond to all errors by reconnecting and trying again
-					return
+					return true
 				default:
 					// if we can't send to the channel we still need to close
-					return
+					return true
 				}
 			}
 
@@ -161,7 +163,9 @@ func (stream *Stream) readLoop(r io.ReadCloser) {
 
 func (stream *Stream) stream(r io.ReadCloser) {
 	defer r.Close()
-	stream.readLoop(r)
+	if !stream.readLoop(r) {
+		return
+	}
 	backoff := stream.retry
 	for {
 		stream.Cancelfunc()
